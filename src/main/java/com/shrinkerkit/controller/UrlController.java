@@ -5,18 +5,18 @@ import com.shrinkerkit.dto.UrlShortenResponse;
 import com.shrinkerkit.entity.UrlMapping;
 import com.shrinkerkit.repository.UrlMappingRepository;
 import com.shrinkerkit.service.ShortCodeService;
-import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.net.MalformedURLException;
-import java.net.URL;
+import java.net.URI;
 
+/**
+ * REST Controller for handling URL shortening and redirection requests.
+ */
 @RestController
-@RequestMapping("/api/v1")
 public class UrlController {
 
     private final ShortCodeService shortCodeService;
@@ -31,24 +31,35 @@ public class UrlController {
     }
 
     /**
-     * Endpoint to create a new short URL.
+     * Endpoint to create a new short URL. It is namespaced under /api/v1.
      * @param request The request body containing the long URL to shorten.
      * @return A response entity containing the full short URL.
      */
-    @PostMapping("/urls")
+    @PostMapping("/api/v1/urls")
     public ResponseEntity<UrlShortenResponse> shortenUrl(@Valid @RequestBody UrlShortenRequest request) {
-        // Generate a unique short code for the URL
         String code = shortCodeService.generateUniqueShortCode();
 
-        // New UrlMapping entity and save it to the database
         UrlMapping urlMapping = new UrlMapping(request.getLongUrl(), code);
         urlMappingRepository.save(urlMapping);
 
-        // Full short URL using the base URL
         String fullShortUrl = baseUrl + "/" + code;
 
-        // Response DTO with a 201 status
         UrlShortenResponse response = new UrlShortenResponse(fullShortUrl);
         return new ResponseEntity<>(response, HttpStatus.CREATED);
+    }
+
+    /**
+     * Endpoint to redirect a short code to its original long URL.
+     * This endpoint is at the root path to handle clicks on short links.
+     * @param shortCode The short code from the URL path.
+     * @return A 302 Found redirect to the long URL, or a 404 Not Found if the code is invalid.
+     */
+    @GetMapping("/{shortCode}")
+    public ResponseEntity<Void> redirectToLongUrl(@PathVariable String shortCode) {
+        return urlMappingRepository.findByShortCode(shortCode)
+                .map(urlMapping -> ResponseEntity.status(HttpStatus.FOUND)
+                        .location(URI.create(urlMapping.getLongUrl()))
+                        .<Void>build()) // The build() call returns ResponseEntity<Void>
+                .orElse(ResponseEntity.notFound().build());
     }
 }
