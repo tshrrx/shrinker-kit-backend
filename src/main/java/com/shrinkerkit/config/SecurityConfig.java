@@ -1,4 +1,4 @@
-package com.shrinkerkit.shrinker_kit_backend.config;
+package com.shrinkerkit.config;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
