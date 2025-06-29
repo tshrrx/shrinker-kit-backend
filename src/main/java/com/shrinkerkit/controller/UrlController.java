@@ -6,60 +6,86 @@ import com.shrinkerkit.entity.UrlMapping;
 import com.shrinkerkit.repository.UrlMappingRepository;
 import com.shrinkerkit.service.ShortCodeService;
 import jakarta.validation.Valid;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.net.URI;
+import java.util.concurrent.TimeUnit;
 
 /**
- * REST Controller for handling URL shortening and redirection requests.
+ * REST Controller for handling URL shortening and redirection requests,
+ * with an integrated Redis caching layer for performance.
  */
 @RestController
 public class UrlController {
 
+    private static final Logger logger = LoggerFactory.getLogger(UrlController.class);
+
     private final ShortCodeService shortCodeService;
     private final UrlMappingRepository urlMappingRepository;
+    private final RedisTemplate<String, String> redisTemplate;
 
     @Value("${shrinkerkit.base.url}")
     private String baseUrl;
 
-    public UrlController(ShortCodeService shortCodeService, UrlMappingRepository urlMappingRepository) {
+    public UrlController(ShortCodeService shortCodeService, UrlMappingRepository urlMappingRepository, RedisTemplate<String, String> redisTemplate) {
         this.shortCodeService = shortCodeService;
         this.urlMappingRepository = urlMappingRepository;
+        this.redisTemplate = redisTemplate;
     }
 
-    /**
-     * Endpoint to create a new short URL. It is namespaced under /api/v1.
-     * @param request The request body containing the long URL to shorten.
-     * @return A response entity containing the full short URL.
-     */
     @PostMapping("/api/v1/urls")
     public ResponseEntity<UrlShortenResponse> shortenUrl(@Valid @RequestBody UrlShortenRequest request) {
         String code = shortCodeService.generateUniqueShortCode();
 
+        // 1. Save to the primary database (PostgreSQL)
         UrlMapping urlMapping = new UrlMapping(request.getLongUrl(), code);
         urlMappingRepository.save(urlMapping);
+        logger.info("Saved new mapping to database: {} -> {}", code, request.getLongUrl());
+
+        // 2. Save to Redis cache with a 24-hour expiration to keep it fresh
+        redisTemplate.opsForValue().set(code, request.getLongUrl(), 24, TimeUnit.HOURS);
+        logger.info("Saved new mapping to Redis cache: {}", code);
 
         String fullShortUrl = baseUrl + "/" + code;
-
         UrlShortenResponse response = new UrlShortenResponse(fullShortUrl);
         return new ResponseEntity<>(response, HttpStatus.CREATED);
     }
 
-    /**
-     * Endpoint to redirect a short code to its original long URL.
-     * This endpoint is at the root path to handle clicks on short links.
-     * @param shortCode The short code from the URL path.
-     * @return A 302 Found redirect to the long URL, or a 404 Not Found if the code is invalid.
-     */
     @GetMapping("/{shortCode}")
     public ResponseEntity<Void> redirectToLongUrl(@PathVariable String shortCode) {
+        // 1. First, try to find the URL in the Redis cache for a fast response.
+        String longUrl = redisTemplate.opsForValue().get(shortCode);
+
+        if (longUrl != null) {
+            logger.info("Cache HIT for code: '{}'. Redirecting to {}", shortCode, longUrl);
+            return ResponseEntity.status(HttpStatus.FOUND)
+                    .location(URI.create(longUrl))
+                    .build();
+        }
+
+        // 2. If not in cache (a "cache miss"), query the main database.
+        logger.warn("Cache MISS for code: '{}'. Querying database.", shortCode);
         return urlMappingRepository.findByShortCode(shortCode)
-                .map(urlMapping -> ResponseEntity.status(HttpStatus.FOUND)
-                        .location(URI.create(urlMapping.getLongUrl()))
-                        .<Void>build()) // The build() call returns ResponseEntity<Void>
-                .orElse(ResponseEntity.notFound().build());
+                .map(urlMapping -> {
+                    // 3. Found it in the database. Now, add it to the cache for future requests.
+                    String foundUrl = urlMapping.getLongUrl();
+                    redisTemplate.opsForValue().set(shortCode, foundUrl, 24, TimeUnit.HOURS);
+                    logger.info("Populated cache for code: '{}'", shortCode);
+
+                    return ResponseEntity.status(HttpStatus.FOUND)
+                            .location(URI.create(foundUrl))
+                            .<Void>build(); // FIX: Explicit type hint added here
+                })
+                .orElseGet(() -> {
+                    // 4. If it's not in the database either, it's a true 404 Not Found.
+                    logger.error("Code '{}' not found in database or cache.", shortCode);
+                    return ResponseEntity.notFound().build();
+                });
     }
 }
