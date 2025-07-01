@@ -13,8 +13,8 @@ import java.time.LocalDateTime;
 @Table(name = "url_mappings", indexes = {
     @Index(name = "idx_short_code", columnList = "short_code", unique = true)
 })
-@Data // Lombok annotation to generate getters, setters, toString, equals, and hashCode
-@NoArgsConstructor // Lombok annotation to generate a no-argument constructor
+@Data
+@NoArgsConstructor
 public class UrlMapping {
 
     @Id
